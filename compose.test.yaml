@@ -1,0 +1,27 @@
+name: cicd-lab-2-test
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: quiz_test
+      POSTGRES_USER: quiz_test
+      # Disposable test database, no published port and no production data.
+      POSTGRES_PASSWORD: test-only
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U quiz_test -d quiz_test']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  tests:
+    build:
+      context: ./backend
+      target: test
+    environment:
+      DATABASE_URL: postgresql+psycopg://quiz_test:test-only@postgres:5432/quiz_test
+      TEST_DATABASE_URL: postgresql+psycopg://quiz_test:test-only@postgres:5432/quiz_test
+    depends_on:
+      postgres:
+        condition: service_healthy

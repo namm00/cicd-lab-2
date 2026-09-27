@@ -1,0 +1,221 @@
+name: CI and CD
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+# Do not cancel an SSH deployment halfway through a migration.
+concurrency:
+  group: cicd-lab-2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  frontend-ci:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+
+  backend-ci:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: pytest tests/unit
+
+  integration-ci:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: quiz_test
+          POSTGRES_USER: quiz_test
+          POSTGRES_PASSWORD: test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U quiz_test -d quiz_test"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://quiz_test:test-only@127.0.0.1:5432/quiz_test
+      TEST_DATABASE_URL: postgresql+psycopg://quiz_test:test-only@127.0.0.1:5432/quiz_test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: backend/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Apply real migrations to real PostgreSQL
+        run: alembic upgrade head
+      - name: Models must match migrated schema
+        run: alembic check
+      - run: pytest tests/integration
+
+  config-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check shell scripts and Compose files
+        env:
+          POSTGRES_PASSWORD: disposable-ci-only
+          POSTGRES_USER: quiz
+          POSTGRES_DB: quiz_lab
+          GHCR_OWNER: validation-only
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          shellcheck -x scripts/*.sh
+          for script in scripts/*.sh; do bash -n "$script"; done
+          docker compose -f compose.yaml config --quiet
+          docker compose -f compose.prod.yaml config --quiet
+          docker compose -f compose.test.yaml config --quiet
+      - name: Check GitHub Actions syntax
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
+      - name: Check deployment failure and rollback state
+        run: python3 -m unittest discover -s scripts/tests -v
+
+  docker-build:
+    needs: [frontend-ci, backend-ci, integration-ci, config-ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [backend, frontend]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set lowercase GHCR image name
+        id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+          COMPONENT: ${{ matrix.component }}
+        run: echo "tag=ghcr.io/${OWNER,,}/cicd-lab-2-${COMPONENT}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR with the short-lived workflow token
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Preserve a previously published SHA tag on workflow reruns
+        id: existing
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE: ${{ steps.image.outputs.tag }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE" > /dev/null 2>&1; then
+            echo 'found=true' >> "$GITHUB_OUTPUT"
+            echo "Reusing the image previously built by CI: $IMAGE"
+          fi
+      - name: Build image; publish only for a push to main
+        if: steps.existing.outputs.found != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: ./${{ matrix.component }}
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: ${{ steps.image.outputs.tag }}
+          build-args: APP_VERSION=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+  deploy:
+    needs: [docker-build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    concurrency:
+      group: cicd-lab-2-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Skip a stale run if main has moved forward
+        id: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [[ "$head_sha" == "$GITHUB_SHA" ]]; then
+            echo 'deploy=true' >> "$GITHUB_OUTPUT"
+          else
+            echo "Skipping stale commit $GITHUB_SHA; main is $head_sha"
+          fi
+      - name: Send deployment scripts, then deploy the exact commit images
+        if: steps.head.outputs.deploy == 'true'
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ vars.VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$VPS_HOST" =~ ^[a-zA-Z0-9.-]+$ ]]
+          [[ "$VPS_USER" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]]
+          [[ -n "$VPS_SSH_KEY" && -n "$VPS_KNOWN_HOSTS" ]]
+          ssh_dir=$(mktemp -d)
+          trap 'rm -rf "$ssh_dir"' EXIT
+          printf '%s\n' "$VPS_SSH_KEY" > "$ssh_dir/key"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          chmod 600 "$ssh_dir/key" "$ssh_dir/known_hosts"
+          ssh_options=(-i "$ssh_dir/key" -o "UserKnownHostsFile=$ssh_dir/known_hosts" -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=10)
+          destination="$VPS_USER@$VPS_HOST"
+          release="/opt/cicd-lab-2/releases/$GITHUB_SHA"
+          tar -czf "$ssh_dir/deploy.tgz" compose.prod.yaml scripts
+          # These paths intentionally expand on the runner; SHA was validated above.
+          # shellcheck disable=SC2029
+          ssh "${ssh_options[@]}" "$destination" "mkdir -p '$release'"
+          scp "${ssh_options[@]}" "$ssh_dir/deploy.tgz" "$destination:$release/deploy.tgz"
+          # shellcheck disable=SC2029
+          ssh "${ssh_options[@]}" "$destination" \
+            "cd '$release' && tar -xzf deploy.tgz && DEPLOY_DIR=/opt/cicd-lab-2 bash scripts/deploy.sh '$GITHUB_SHA'"

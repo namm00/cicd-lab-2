@@ -1,0 +1,17 @@
+:root { font-family: system-ui, sans-serif; color: #203047; background: #f5f7fa; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: 820px; margin: 32px auto; padding: 0 20px 48px; }
+h1 { margin: 6px 0; }
+header > p:first-child { color: #426493; font-size: .8rem; letter-spacing: .12em; }
+section { background: white; border: 1px solid #dbe2ea; border-radius: 8px; padding: 20px; margin-top: 24px; }
+label { display: block; margin: 12px 0; }
+input:not([type=radio]), textarea, select { display: block; width: 100%; padding: 9px; margin-top: 6px; border: 1px solid #9eafc4; border-radius: 4px; font: inherit; }
+button { padding: 9px 14px; border: 1px solid #294d7d; border-radius: 4px; color: white; background: #294d7d; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+li { margin: 10px 0; }
+fieldset { border: 1px solid #c7d2df; margin: 20px 0; }
+.answer { display: flex; align-items: baseline; gap: 8px; }
+summary { cursor: pointer; }
+.error { padding: 12px; color: #9f1b1b; background: #ffe8e8; overflow-wrap: anywhere; }
+code { overflow-wrap: anywhere; }

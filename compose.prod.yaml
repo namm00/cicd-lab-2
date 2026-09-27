@@ -1,0 +1,47 @@
+name: cicd-lab-2-prod
+
+# No build: on the VPS. IMAGE_TAG is the full commit SHA passed by deploy.sh.
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER}/cicd-lab-2-backend:${IMAGE_TAG:?Pass a commit SHA}
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '${BIND_ADDRESS:-0.0.0.0}:${BACKEND_PORT:-8002}:8000'
+
+  frontend:
+    image: ghcr.io/${GHCR_OWNER:?Set GHCR_OWNER}/cicd-lab-2-frontend:${IMAGE_TAG:?Pass a commit SHA}
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      backend:
+        # deploy.sh owns the explicit health retry and failure logging.
+        condition: service_started
+    ports:
+      - '${BIND_ADDRESS:-0.0.0.0}:${FRONTEND_PORT:-8082}:8080'
+
+volumes:
+  postgres_data:
