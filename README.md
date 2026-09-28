@@ -1,4 +1,4 @@
-# cicd-lab-2 — nhìn thấy toàn bộ luồng CI/CD
+# cicd-lab-2 — nhìn thấy toàn bộ luồng CI/CDa
 
 Mini Quiz dùng React/Vite/TypeScript, FastAPI/SQLAlchemy/Alembic và PostgreSQL. Bạn tạo quiz, thêm câu hỏi có 4 đáp án, làm quiz và xem điểm ngay trên trình duyệt. Không lưu lịch sử. Đáp án đúng có trong JSON gửi tới browser để giữ business logic nhỏ; đây là lab, không phải hệ thống thi.
 
